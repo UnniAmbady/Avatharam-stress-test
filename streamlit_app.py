@@ -1,5 +1,5 @@
 # Avatharam-2.2
-# Stress-test-2.0
+# Stress-test-3.0
 # Ver-8.1  (#Color of buttons - fixed)
 
 import atexit
@@ -7,8 +7,9 @@ import json
 import os
 import time
 import subprocess
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import requests
 import streamlit as st
@@ -17,7 +18,7 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Avatharam-2", layout="centered")
 st.text("by Krish Ambady")
 
-# ---------------- CSS (same colours/structure) ----------------
+# ---------------- CSS (unchanged) ----------------
 st.markdown(
     """
 <style>
@@ -81,10 +82,10 @@ if not HEYGEN_API_KEY:
 
 # ---------------- Endpoints ----------------
 BASE = "https://api.heygen.com/v1"
-API_STREAM_NEW = f"{BASE}/streaming.new"
+API_STREAM_NEW   = f"{BASE}/streaming.new"
 API_CREATE_TOKEN = f"{BASE}/streaming.create_token"
-API_STREAM_TASK = f"{BASE}/streaming.task"
-API_STREAM_STOP = f"{BASE}/streaming.stop"
+API_STREAM_TASK  = f"{BASE}/streaming.task"
+API_STREAM_STOP  = f"{BASE}/streaming.stop"
 
 HEADERS_XAPI = {
     "accept": "application/json",
@@ -111,20 +112,19 @@ ss.setdefault("voice_inserted_once", False)
 ss.setdefault("bgm_should_play", True)
 ss.setdefault("auto_started", False)
 
-# Stress-test text memory
+# Stress-test memory
 ss.setdefault("test_text", "")
 
-# Stress-timer state (added)
-ss.setdefault("stress_enabled", False)       # becomes True after first Instruction click
-ss.setdefault("stress_phase", "silent")      # "speak" or "silent"
-ss.setdefault("stress_phase_until", 0.0)     # epoch seconds when current phase ends
-ss.setdefault("next_tick_at", 0.0)           # epoch seconds for the next 2s tick
+# Timer/keepalive state (NEW)
+ss.setdefault("stress_active", False)      # set True after Instruction completes
+ss.setdefault("next_keepalive_at", 0.0)    # epoch: when to send next "Hi"
+ss.setdefault("autorefresh_on", False)     # controls the 2s autorefresh pinger
 
 # ---------------- Debug ----------------
 def debug(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ---------------- Stress-test loader ----------------
+# ---------------- Load Speech.txt ----------------
 DEFAULT_INSTRUCTION = (
     "To speak to me, press the speak button, pause a second and then speak. "
     "Once you have spoken press the [Stop] button"
@@ -142,7 +142,6 @@ def _read_speech_txt() -> Optional[str]:
     txt = txt.strip()
     return txt if txt else None
 
-# Load once at startup
 if not ss.get("test_text"):
     loaded = _read_speech_txt()
     if loaded:
@@ -157,7 +156,7 @@ if not ss.get("test_text"):
 
 # ---------------- HTTP helpers ----------------
 def _post_xapi(url, payload=None):
-    r = requests.post(url, headers=HEADERS_XAPI, data=json.dumps(payload or {}), timeout=60)
+    r = requests.post(url, headers=HEADERS_XAPI, data=json.dumps(payload or {}), timeout=120)
     try:
         body = r.json()
     except Exception:
@@ -169,7 +168,7 @@ def _post_xapi(url, payload=None):
     return r.status_code, body
 
 def _post_bearer(url, token, payload=None):
-    r = requests.post(url, headers=_headers_bearer(token), data=json.dumps(payload or {}), timeout=60)
+    r = requests.post(url, headers=_headers_bearer(token), data=json.dumps(payload or {}), timeout=600)
     try:
         body = r.json()
     except Exception:
@@ -208,24 +207,77 @@ def create_session_token(session_id: str) -> str:
         raise RuntimeError(f"Missing token in response: {body}")
     return tok
 
-def send_text_to_avatar(session_id: str, session_token: str, text: str):
-    # NOTE (stress guidance): keep text length < 999 characters
-    # => empirically ~1 minute of speech for the avatar.
+# --- Chunking (<999 chars) ---
+MAX_PACKET_CHARS = 999  # NOTE: Empirical limit; ~1 minute of speech at this size.
+
+def _chunk_text(s: str, limit: int = MAX_PACKET_CHARS) -> List[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    if len(s) <= limit:
+        return [s]
+    sentences = re.split(r'(?<=[\.\!\?])\s+', s)
+    chunks, cur = [], ""
+    for sent in sentences:
+        if not sent:
+            continue
+        candidate = (cur + " " + sent).strip() if cur else sent
+        if len(candidate) <= limit:
+            cur = candidate
+        else:
+            if cur:
+                chunks.append(cur)
+            if len(sent) > limit:
+                for i in range(0, len(sent), limit):
+                    chunks.append(sent[i:i+limit])
+                cur = ""
+            else:
+                cur = sent
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+def _send_task_text(session_id: str, session_token: str, text: str) -> int:
+    """Send one task; returns HTTP status code.
+    Using task_mode='sync' so 200 means avatar finished speaking this text.
+    """
     try:
         b = text.encode("utf-8")
-        debug(f"[avatar] speak chars={len(text)}, bytes={len(b)}")
+        debug(f"[avatar] send @ {time.strftime('%H:%M:%S')} chars={len(text)}, bytes={len(b)}")
     except Exception:
-        debug(f"[avatar] speak {len(text)} chars (byte count unavailable)")
-    _post_bearer(
+        debug(f"[avatar] send @ {time.strftime('%H:%M:%S')} chars={len(text)} (bytes n/a)")
+
+    status, body = _post_bearer(
         API_STREAM_TASK,
         session_token,
         {
             "session_id": session_id,
             "task_type": "repeat",
-            "task_mode": "sync",
+            "task_mode": "sync",   # <-- 200 returned when speech is DONE for this packet
             "text": text,
         },
     )
+    debug(f"[avatar] task completed HTTP {status}; body keys={list((body or {}).keys())}")
+    return status
+
+def send_text_to_avatar(session_id: str, session_token: str, text: str) -> bool:
+    """
+    Sends text in <999-char chunks. Returns True when the **final** chunk completed (HTTP 200).
+    # NOTE: Keep text length < 999 chars per packet (~1 minute of speech).
+    """
+    if not text:
+        return False
+    chunks = _chunk_text(text, MAX_PACKET_CHARS)
+    ok = True
+    for idx, chunk in enumerate(chunks, 1):
+        status = _send_task_text(session_id, session_token, chunk)
+        if status != 200:
+            ok = False
+            debug(f"[avatar] chunk {idx}/{len(chunks)} failed (HTTP {status})")
+            break
+        else:
+            debug(f"[avatar] chunk {idx}/{len(chunks)} OK")
+    return ok
 
 def stop_session(session_id: Optional[str], session_token: Optional[str]):
     if not (session_id and session_token):
@@ -246,7 +298,7 @@ def _graceful_shutdown():
     except Exception:
         pass
 
-# ---------------- Audio helpers ----------------
+# ---------------- Audio helpers (unchanged) ----------------
 def sniff_mime(b: bytes) -> str:
     try:
         if len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WAVE": return "audio/wav"
@@ -291,7 +343,7 @@ def prepare_for_soundbar(audio_bytes: bytes, mime: str) -> tuple[bytes, str]:
     debug(f"[soundbar] pass-through mime={mime}")
     return audio_bytes, mime
 
-# ---------------- Local ASR helper ----------------
+# ---------------- Local ASR helper (unchanged) ----------------
 def _save_bytes_tmp(b: bytes, suffix: str) -> str:
     tmp = Path("/tmp") if Path("/tmp").exists() else Path.cwd()
     f = tmp / f"audio_{int(time.time()*1000)}{suffix}"
@@ -366,9 +418,10 @@ if ss.show_sidebar:
             ss.session_id = None; ss.session_token = None
             ss.offer_sdp = None; ss.rtc_config = None
             ss.bgm_should_play = False
-            # Stop the stress loop as well
-            ss.stress_enabled = False
-            debug("[stopped] session cleared & stress loop disabled")
+            # also stop keepalive
+            ss.stress_active = False
+            ss.autorefresh_on = False
+            debug("[stopped] session cleared; keepalive disabled")
 
 # ---------------- Background music ----------------
 benhur_path = Path.cwd() / "BenHur-Music.mp3"
@@ -490,17 +543,18 @@ with col1:
         if not (ss.session_id and ss.session_token and ss.offer_sdp):
             st.warning("Start a session first.")
         else:
-            # Prefer Speech.txt content; fallback to default
             text_to_send = ss.test_text if ss.test_text else DEFAULT_INSTRUCTION
-            send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
+            # 1) Send long text in chunks; 200 on the final chunk means fully read.
+            t0 = time.time()
+            ok = send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
+            t1 = time.time()
+            debug(f"[timer] long-text send finished ok={ok}; elapsed={t1 - t0:.2f}s")
 
-            # ---- Enable the stress timer after first Instruction press ----
-            # Start in 'speak' phase for 60 seconds, then 60 seconds 'silent', repeating.
-            ss.stress_enabled = True
-            ss.stress_phase = "speak"
-            ss.stress_phase_until = time.time() + 60.0
-            ss.next_tick_at = time.time() + 2.0
-            debug("[stress] loop enabled: speak 60s / silent 60s, tick=2s")
+            # 2) Start/Reset keepalive: first 'Hi' at +50s, then every +60s.
+            ss.stress_active = True
+            ss.next_keepalive_at = time.time() + 50.0
+            ss.autorefresh_on = True
+            debug(f"[timer] keepalive armed: next 'Hi' at +50s -> {time.strftime('%H:%M:%S', time.localtime(ss.next_keepalive_at))}")
 
 with col2:
     if st.button("ChatGPT", key="btn_chatgpt_main", use_container_width=True):
@@ -547,29 +601,34 @@ ss.gpt_query = st.text_area(
     key="txt_edit_gpt_query",
 )
 
-# ---------------- 2-second stress timer loop (added) ----------------
-if ss.get("stress_enabled", False):
+# ---------------- Autorefresh & Keepalive (NEW) ----------------
+def _install_autorefresh(active: bool, interval_ms: int = 2000):
+    """Re-run the Streamlit script every interval_ms using a tiny component."""
+    if not active:
+        return
+    components.html(
+        f"""
+        <script>
+        if (window.__stressAutoRefresh) {{
+            clearInterval(window.__stressAutoRefresh);
+        }}
+        window.__stressAutoRefresh = setInterval(function() {{
+            window.parent.postMessage({{type: 'streamlit:rerun'}}, '*');
+        }}, {interval_ms});
+        </script>
+        """,
+        height=0,
+    )
+
+# Arm 2s autorefresh if timer is active
+_install_autorefresh(ss.autorefresh_on, 2000)
+
+# On each rerun, if time passed, send "Hi" and schedule next
+if ss.stress_active and ss.session_id and ss.session_token and ss.offer_sdp:
     now = time.time()
-
-    # Phase rollover
-    if now >= ss.stress_phase_until:
-        if ss.stress_phase == "speak":
-            ss.stress_phase = "silent"
-            ss.stress_phase_until = now + 60.0
-            debug("[stress] phase -> SILENT (60s)")
-        else:
-            ss.stress_phase = "speak"
-            ss.stress_phase_until = now + 60.0
-            debug("[stress] phase -> SPEAK (60s)")
-
-    # On each 2s tick, during SPEAK phase, send the long text again
-    if now >= ss.next_tick_at:
-        ss.next_tick_at = now + 2.0
-        if ss.stress_phase == "speak" and ss.session_id and ss.session_token and ss.offer_sdp:
-            text_to_send = ss.test_text if ss.test_text else DEFAULT_INSTRUCTION
-            send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
-            debug("[stress] tick -> sent")
-
-    # Rerun every 2 seconds while enabled
-    time.sleep(2.0)
-    st.experimental_rerun()
+    if now >= float(ss.next_keepalive_at or 0):
+        status = _send_task_text(ss.session_id, ss.session_token, "Hi")
+        debug(f"[keepalive] sent @ {time.strftime('%H:%M:%S')} -> HTTP {status}")
+        # Next "Hi" in 60 seconds (occupy every 1 minute from last conversation)
+        ss.next_keepalive_at = time.time() + 60.0
+        debug(f"[timer] next keepalive at {time.strftime('%H:%M:%S', time.localtime(ss.next_keepalive_at))}")
