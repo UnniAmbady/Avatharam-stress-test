@@ -1,17 +1,6 @@
 # Avatharam-2.2
 # Stress-test-1.0
 # Ver-8.1  (#Color of buttons - fixed)
-# Cosmetic-only update over Ver-7.5.2:
-# - Removed redundant top Speak/Stop buttons
-# - Kept the real mic toggle centered
-# - Colors applied via the 'horizontal block + nth-of-type' CSS pattern (as in streamlit_app-Colours.py)
-#   * Speak (red) / Stop (green)
-#   * Instruction (blue)
-#   * ChatGPT (orange)
-# - No functional changes to any feature, except stress-test additions:
-#   * On startup, read Speech.txt into memory variable `test_text`
-#   * On 'Instruction' click, send the whole `test_text` to the Avatar
-#   * Debug logs show char length and byte length being sent
 
 import atexit
 import json
@@ -28,7 +17,7 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Avatharam-2", layout="centered")
 st.text("by Krish Ambady")
 
-# ---------------- CSS (scoped like your Colours.py) ----------------
+# ---------------- CSS (same colours/structure) ----------------
 st.markdown(
     """
 <style>
@@ -37,42 +26,27 @@ st.markdown(
   .rowbtn .stButton>button { height:40px; font-size:.95rem; border-radius:12px; }
   div.stChatInput textarea { min-height: 3.4em !important; max-height: 3.8em !important; }
 
-  /* ===== Mic recorder row (Speak/Stop) ===== */
-  #micow div[data-testid="stHorizontalBlock"] > div:nth-of-type(1) button {
-      background-color: #e74c3c;  /* red = Speak */
-      color: #ffffff;
-      border-color: #e74c3c;
-      border-radius: 12px;
-      height: 44px;
-      font-weight: 600;
+  /* Mic row */
+  #microw div[data-testid="stHorizontalBlock"] > div:nth-of-type(1) button {
+      background-color: #e74c3c; color: #ffffff; border-color: #e74c3c;
+      border-radius: 12px; height: 44px; font-weight: 600;
   }
-  #micow div[data-testid="stHorizontalBlock"] > div:nth-of-type(2) button {
-      background-color: #27ae60;  /* green = Stop */
-      color: #ffffff;
-      border-color: #27ae60;
-      border-radius: 12px;
-      height: 44px;
-      font-weight: 600;
+  #micow div[data-testid="stHorizontalBlock"] > div:nth-of-type(2) button,
+  #microw div[data-testid="stHorizontalBlock"] > div:nth-of-type(2) button {
+      background-color: #27ae60; color: #ffffff; border-color: #27ae60;
+      border-radius: 12px; height: 44px; font-weight: 600;
   }
-  #micow div[data-testid="stHorizontalBlock"] > div button:hover { filter: brightness(0.95); }
-  #micow div[data-testid="stHorizontalBlock"] > div button:active { transform: translateY(1px); }
+  #microw div[data-testid="stHorizontalBlock"] > div button:hover { filter: brightness(0.95); }
+  #microw div[data-testid="stHorizontalBlock"] > div button:active { transform: translateY(1px); }
 
-  /* ===== Actions row (Instruction / ChatGPT) ===== */
+  /* Actions row */
   #actrow div[data-testid="stHorizontalBlock"] > div:nth-of-type(1) button {
-      background-color: #2980b9;  /* blue = Instruction */
-      color: #ffffff;
-      border-color: #2980b9;
-      border-radius: 12px;
-      height: 48px;
-      font-weight: 600;
+      background-color: #2980b9; color: #ffffff; border-color: #2980b9;
+      border-radius: 12px; height: 48px; font-weight: 600;
   }
   #actrow div[data-testid="stHorizontalBlock"] > div:nth-of-type(2) button {
-      background-color: #f39c12;  /* orange = ChatGPT */
-      color: #000000;
-      border-color: #f39c12;
-      border-radius: 12px;
-      height: 48px;
-      font-weight: 600;
+      background-color: #f39c12; color: #000000; border-color: #f39c12;
+      border-radius: 12px; height: 48px; font-weight: 600;
   }
   #actrow div[data-testid="stHorizontalBlock"] > div button:hover { filter: brightness(0.95); }
   #actrow div[data-testid="stHorizontalBlock"] > div button:active { transform: translateY(1px); }
@@ -136,51 +110,46 @@ ss.setdefault("voice_ready", False)
 ss.setdefault("voice_inserted_once", False)
 ss.setdefault("bgm_should_play", True)
 ss.setdefault("auto_started", False)
-# --- Stress-test memory variable ---
+# Stress-test text memory
 ss.setdefault("test_text", "")
 
 # ---------------- Debug ----------------
 def debug(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ---------------- Stress-test: load Speech.txt at startup ----------------
-def _find_speech_file() -> Optional[Path]:
-    # Try likely names & locations, including your uploaded 'Speech.txt.txt'
-    candidates = [
-        Path("Speech.txt"),
-        Path("speech.txt"),
-        Path("Speech.TXT"),
-        Path("Speech.txt.txt"),                 # uploaded variant
-        Path(__file__).parent / "Speech.txt",
-        Path(__file__).parent / "Speech.txt.txt",
-        Path("/mnt/data") / "Speech.txt",
-        Path("/mnt/data") / "Speech.txt.txt",
-    ]
-    for p in candidates:
-        try:
-            if p.exists() and p.is_file():
-                return p
-        except Exception:
-            pass
-    return None
+# ---------------- Stress-test loader ----------------
+DEFAULT_INSTRUCTION = (
+    "To speak to me, press the speak button, pause a second and then speak. "
+    "Once you have spoken press the [Stop] button"
+)
 
-def _load_test_text():
-    if ss.get("test_text"):
-        return
-    p = _find_speech_file()
-    if p:
+def _read_speech_txt() -> Optional[str]:
+    """
+    Optimized for your constraint: Speech.txt is in the *current working directory*.
+    Minimal checks, robust decoding.
+    """
+    p = Path("Speech.txt")
+    if not p.exists() or not p.is_file():
+        return None
+    try:
+        txt = p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        txt = p.read_text(errors="ignore")
+    txt = txt.strip()
+    return txt if txt else None
+
+# Load once at startup
+if not ss.get("test_text"):
+    loaded = _read_speech_txt()
+    if loaded:
+        ss.test_text = loaded
         try:
-            txt = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Fallback if file has odd encoding
-            txt = p.read_text(errors="ignore")
-        ss.test_text = txt.strip()
-        b = ss.test_text.encode("utf-8")
-        debug(f"[stress-load] loaded '{p.name}': chars={len(ss.test_text)}, bytes={len(b)}")
+            b = loaded.encode("utf-8")
+            debug(f"[stress-load] Speech.txt loaded: chars={len(loaded)}, bytes={len(b)}")
+        except Exception:
+            debug(f"[stress-load] Speech.txt loaded: chars={len(loaded)} (byte count unavailable)")
     else:
-        # Keep empty; we won't alter UI – only log
-        debug("[stress-load] Speech.txt not found; Instruction will use default prompt")
-_load_test_text()
+        debug("[stress-load] Speech.txt not found/empty; will use default instruction fallback.")
 
 # ---------------- HTTP helpers ----------------
 def _post_xapi(url, payload=None):
@@ -236,7 +205,7 @@ def create_session_token(session_id: str) -> str:
     return tok
 
 def send_text_to_avatar(session_id: str, session_token: str, text: str):
-    # Stress-test: log char + byte counts before sending
+    # Log both char and byte counts for stress test
     try:
         b = text.encode("utf-8")
         debug(f"[avatar] speak chars={len(text)}, bytes={len(b)}")
@@ -275,16 +244,11 @@ def _graceful_shutdown():
 # ---------------- Audio helpers ----------------
 def sniff_mime(b: bytes) -> str:
     try:
-        if len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WAVE":
-            return "audio/wav"
-        if b.startswith(b"ID3") or (len(b) > 1 and b[0] == 0xFF and (b[1] & 0xE0) == 0xE0):
-            return "audio/mpeg"
-        if b.startswith(b"OggS"):
-            return "audio/ogg"
-        if len(b) >= 4 and b[:4] == b"\x1a\x45\xdf\xa3":
-            return "audio/webm"
-        if len(b) >= 12 and b[4:8] == b"ftyp":
-            return "audio/mp4"
+        if len(b) >= 12 and b[:4] == b"RIFF" and b[8:12] == b"WAVE": return "audio/wav"
+        if b.startswith(b"ID3") or (len(b) > 1 and b[0] == 0xFF and (b[1] & 0xE0) == 0xE0): return "audio/mpeg"
+        if b.startswith(b"OggS"): return "audio/ogg"
+        if len(b) >= 4 and b[:4] == b"\x1a\x45\xdf\xa3": return "audio/webm"
+        if len(b) >= 12 and b[4:8] == b"ftyp": return "audio/mp4"
     except Exception:
         pass
     return "audio/wav"
@@ -314,8 +278,7 @@ def prepare_for_soundbar(audio_bytes: bytes, mime: str) -> tuple[bytes, str]:
     if mime in ("audio/webm", "audio/ogg"):
         out, ok = _ffmpeg_convert_bytes(audio_bytes, ".webm" if mime.endswith("webm") else ".ogg", ".wav", ["-ar", "16000", "-ac", "1"])
         debug(f"[soundbar] convert={ok}, final_mime={'audio/wav' if ok else mime}")
-        if ok and out:
-            return out, "audio/wav"
+        if ok and out: return out, "audio/wav"
         return audio_bytes, mime
     if mime == "audio/mp4":
         debug("[soundbar] pass mp4")
@@ -327,8 +290,7 @@ def prepare_for_soundbar(audio_bytes: bytes, mime: str) -> tuple[bytes, str]:
 def _save_bytes_tmp(b: bytes, suffix: str) -> str:
     tmp = Path("/tmp") if Path("/tmp").exists() else Path.cwd()
     f = tmp / f"audio_{int(time.time()*1000)}{suffix}"
-    f.write_bytes(b)
-    return str(f)
+    f.write_bytes(b); return str(f)
 
 def transcribe_local(audio_bytes: bytes, mime: str) -> str:
     ext = ".wav" if "wav" in mime else ".mp3" if "mp3" in mime else ".webm" if "webm" in mime else ".ogg" if "ogg" in mime else ".m4a"
@@ -338,8 +300,7 @@ def transcribe_local(audio_bytes: bytes, mime: str) -> str:
         model = WhisperModel("tiny", device="auto", compute_type="int8")
         segments, _info = model.transcribe(fpath, beam_size=1, language="en")
         txt = " ".join(s.text.strip() for s in segments).strip()
-        if txt:
-            return txt
+        if txt: return txt
     except Exception as e:
         debug(f"[local asr] faster-whisper error: {repr(e)}")
     try:
@@ -359,16 +320,12 @@ def transcribe_local(audio_bytes: bytes, mime: str) -> str:
             result = []
             while True:
                 data = wf.readframes(4000)
-                if len(data) == 0:
-                    break
+                if len(data) == 0: break
                 if rec.AcceptWaveform(data):
-                    j = _json.loads(rec.Result())
-                    result.append(j.get("text", ""))
-            j = _json.loads(rec.FinalResult())
-            result.append(j.get("text", ""))
+                    j = _json.loads(rec.Result()); result.append(j.get("text", ""))
+            j = _json.loads(rec.FinalResult()); result.append(j.get("text", ""))
             txt = " ".join(x.strip() for x in result if x).strip()
-            if txt:
-                return txt
+            if txt: return txt
     except Exception as e:
         debug(f"[local asr] vosk error: {repr(e)}")
     return ""
@@ -401,15 +358,13 @@ if ss.show_sidebar:
             debug(f"[ready] session_id={sid[:8]}...")
         if st.button("Stop", key="btn_stop_sidebar"):
             stop_session(ss.session_id, ss.session_token)
-            ss.session_id = None
-            ss.session_token = None
-            ss.offer_sdp = None
-            ss.rtc_config = None
+            ss.session_id = None; ss.session_token = None
+            ss.offer_sdp = None; ss.rtc_config = None
             ss.bgm_should_play = False
             debug("[stopped] session cleared")
 
 # ---------------- Background music ----------------
-benhur_path = Path(__file__).parent / "BenHur-Music.mp3"
+benhur_path = Path.cwd() / "BenHur-Music.mp3"
 if ss.bgm_should_play and benhur_path.exists():
     components.html("<audio id='bgm' src='BenHur-Music.mp3' autoplay loop></audio>", height=0, scrolling=False)
 else:
@@ -431,7 +386,9 @@ if not ss.auto_started:
         debug(f"[auto-start] failed: {repr(e)}")
 
 # ---------------- Main viewer area ----------------
-viewer_path = Path(__file__).parent / "viewer.html"
+# Try your ver-specific viewer first, then fallback to viewer.html
+viewer_candidates = [Path.cwd() / "viewer -Ver-8.1.html", Path.cwd() / "viewer.html"]
+viewer_path = next((p for p in viewer_candidates if p.exists()), None)
 viewer_loaded = ss.session_id and ss.session_token and ss.offer_sdp
 
 if viewer_loaded and ss.bgm_should_play:
@@ -447,7 +404,7 @@ def _image_compat(url: str, caption: str = ""):
         except TypeError:
             st.image(url, caption=caption)
 
-if viewer_loaded and viewer_path.exists():
+if viewer_loaded and viewer_path:
     html = (
         viewer_path.read_text(encoding="utf-8")
         .replace("__SESSION_TOKEN__", ss.session_token)
@@ -461,7 +418,7 @@ else:
     if ss.session_id is None and ss.session_token is None:
         _image_compat(FIXED_AVATAR["normal_preview"], caption=f"{FIXED_AVATAR['pose_name']} ({FIXED_AVATAR['avatar_id']})")
 
-# ---------------- Mic recorder (centered; colored via #micow CSS) ----------------
+# ---------------- Mic recorder (centered) ----------------
 try:
     from streamlit_mic_recorder import mic_recorder
     _HAS_MIC = True
@@ -473,11 +430,9 @@ wav_bytes: Optional[bytes] = None
 mime: str = "audio/wav"
 
 with st.container():
-    center_cols = st.columns([1, 2, 1])  # keep centered
+    center_cols = st.columns([1, 2, 1])
     with center_cols[1]:
-        # The recorder renders its own two buttons; we wrap this area so the CSS can
-        # target the immediate horizontal block inside.
-        st.markdown('<div id="micow">', unsafe_allow_html=True)
+        st.markdown('<div id="microw">', unsafe_allow_html=True)
         audio = mic_recorder(
             start_prompt="Speak",
             stop_prompt="Stop",
@@ -529,12 +484,9 @@ with col1:
         if not (ss.session_id and ss.session_token and ss.offer_sdp):
             st.warning("Start a session first.")
         else:
-            # Stress-test behavior: send entire loaded test_text (fallback to original short prompt if missing)
-            text_to_send = ss.test_text.strip() if ss.test_text else \
-                "To speak to me, press the speak button, pause a second and then speak. Once you have spoken press the [Stop] button"
-            # Log bytes and chars via send_text_to_avatar
+            # Prefer Speech.txt content; fallback to default
+            text_to_send = ss.test_text if ss.test_text else DEFAULT_INSTRUCTION
             send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
-
 with col2:
     if st.button("ChatGPT", key="btn_chatgpt_main", use_container_width=True):
         user_text = (ss.get("gpt_query") or "").strip()
