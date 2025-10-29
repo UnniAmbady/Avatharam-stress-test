@@ -1,5 +1,5 @@
 # Avatharam-2.2
-# Stress-test-1.0
+# Stress-test-2.0
 # Ver-8.1  (#Color of buttons - fixed)
 
 import atexit
@@ -110,8 +110,15 @@ ss.setdefault("voice_ready", False)
 ss.setdefault("voice_inserted_once", False)
 ss.setdefault("bgm_should_play", True)
 ss.setdefault("auto_started", False)
+
 # Stress-test text memory
 ss.setdefault("test_text", "")
+
+# Stress-timer state (added)
+ss.setdefault("stress_enabled", False)       # becomes True after first Instruction click
+ss.setdefault("stress_phase", "silent")      # "speak" or "silent"
+ss.setdefault("stress_phase_until", 0.0)     # epoch seconds when current phase ends
+ss.setdefault("next_tick_at", 0.0)           # epoch seconds for the next 2s tick
 
 # ---------------- Debug ----------------
 def debug(msg: str):
@@ -124,10 +131,7 @@ DEFAULT_INSTRUCTION = (
 )
 
 def _read_speech_txt() -> Optional[str]:
-    """
-    Optimized for your constraint: Speech.txt is in the *current working directory*.
-    Minimal checks, robust decoding.
-    """
+    """Assumes Speech.txt is in the current working directory."""
     p = Path("Speech.txt")
     if not p.exists() or not p.is_file():
         return None
@@ -205,7 +209,8 @@ def create_session_token(session_id: str) -> str:
     return tok
 
 def send_text_to_avatar(session_id: str, session_token: str, text: str):
-    # Log both char and byte counts for stress test
+    # NOTE (stress guidance): keep text length < 999 characters
+    # => empirically ~1 minute of speech for the avatar.
     try:
         b = text.encode("utf-8")
         debug(f"[avatar] speak chars={len(text)}, bytes={len(b)}")
@@ -361,7 +366,9 @@ if ss.show_sidebar:
             ss.session_id = None; ss.session_token = None
             ss.offer_sdp = None; ss.rtc_config = None
             ss.bgm_should_play = False
-            debug("[stopped] session cleared")
+            # Stop the stress loop as well
+            ss.stress_enabled = False
+            debug("[stopped] session cleared & stress loop disabled")
 
 # ---------------- Background music ----------------
 benhur_path = Path.cwd() / "BenHur-Music.mp3"
@@ -386,7 +393,6 @@ if not ss.auto_started:
         debug(f"[auto-start] failed: {repr(e)}")
 
 # ---------------- Main viewer area ----------------
-# Try your ver-specific viewer first, then fallback to viewer.html
 viewer_candidates = [Path.cwd() / "viewer -Ver-8.1.html", Path.cwd() / "viewer.html"]
 viewer_path = next((p for p in viewer_candidates if p.exists()), None)
 viewer_loaded = ss.session_id and ss.session_token and ss.offer_sdp
@@ -487,6 +493,15 @@ with col1:
             # Prefer Speech.txt content; fallback to default
             text_to_send = ss.test_text if ss.test_text else DEFAULT_INSTRUCTION
             send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
+
+            # ---- Enable the stress timer after first Instruction press ----
+            # Start in 'speak' phase for 60 seconds, then 60 seconds 'silent', repeating.
+            ss.stress_enabled = True
+            ss.stress_phase = "speak"
+            ss.stress_phase_until = time.time() + 60.0
+            ss.next_tick_at = time.time() + 2.0
+            debug("[stress] loop enabled: speak 60s / silent 60s, tick=2s")
+
 with col2:
     if st.button("ChatGPT", key="btn_chatgpt_main", use_container_width=True):
         user_text = (ss.get("gpt_query") or "").strip()
@@ -531,3 +546,30 @@ ss.gpt_query = st.text_area(
     label_visibility="collapsed",
     key="txt_edit_gpt_query",
 )
+
+# ---------------- 2-second stress timer loop (added) ----------------
+if ss.get("stress_enabled", False):
+    now = time.time()
+
+    # Phase rollover
+    if now >= ss.stress_phase_until:
+        if ss.stress_phase == "speak":
+            ss.stress_phase = "silent"
+            ss.stress_phase_until = now + 60.0
+            debug("[stress] phase -> SILENT (60s)")
+        else:
+            ss.stress_phase = "speak"
+            ss.stress_phase_until = now + 60.0
+            debug("[stress] phase -> SPEAK (60s)")
+
+    # On each 2s tick, during SPEAK phase, send the long text again
+    if now >= ss.next_tick_at:
+        ss.next_tick_at = now + 2.0
+        if ss.stress_phase == "speak" and ss.session_id and ss.session_token and ss.offer_sdp:
+            text_to_send = ss.test_text if ss.test_text else DEFAULT_INSTRUCTION
+            send_text_to_avatar(ss.session_id, ss.session_token, text_to_send)
+            debug("[stress] tick -> sent")
+
+    # Rerun every 2 seconds while enabled
+    time.sleep(2.0)
+    st.experimental_rerun()
